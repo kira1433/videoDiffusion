@@ -148,12 +148,12 @@ class Diffusion:
             for i in tqdm(reversed(range(1, self.noise_steps)), position=0):
                 t = torch.ones(n, dtype=torch.long, device=self.device) * i
 
-                sqrt_alpha_t = self.sqrt_alpha[t].view(-1, 1, 1, 1)
-                beta_t = self.beta[t].view(-1, 1, 1, 1)
+                sqrt_alpha_t = self.sqrt_alpha[t].view(-1, 1, 1, 1, 1)
+                beta_t = self.beta[t].view(-1, 1, 1, 1, 1)
                 sqrt_one_minus_alpha_hat_t = self.sqrt_one_minus_alpha_hat[t].view(
-                    -1, 1, 1, 1
+                    -1, 1, 1, 1, 1
                 )
-                epsilon_t = self.std_beta[t].view(-1, 1, 1, 1)
+                epsilon_t = self.std_beta[t].view(-1, 1, 1, 1, 1)
 
                 random_noise = torch.randn_like(x) if i > 1 else torch.zeros_like(x)
 
@@ -168,168 +168,221 @@ class Diffusion:
         x = F.interpolate(input=x, scale_factor=scale_factor, mode="nearest-exact")
         return x
 
+    def generate_gif(
+        self,
+        eps_model: nn.Module,
+        n: int = 1,
+        save_path: str = "",
+        output_name: str = None,
+        skip_steps: int = 20,
+        scale_factor: int = 2,
+    ) -> None:
+        logging.info(f"Generating gif....")
+        frames_list = []
+
+        eps_model.eval()
+        with torch.no_grad():
+            x = torch.randn((n, 3, self.img_size, self.img_size), device=self.device)
+
+            for i in tqdm(reversed(range(1, self.noise_steps)), position=0):
+                t = torch.ones(n, dtype=torch.long, device=self.device) * i
+
+                sqrt_alpha_t = self.sqrt_alpha[t].view(-1, 1, 1, 1)
+                beta_t = self.beta[t].view(-1, 1, 1, 1)
+                sqrt_one_minus_alpha_hat_t = self.sqrt_one_minus_alpha_hat[t].view(
+                    -1, 1, 1, 1
+                )
+                epsilon_t = self.std_beta[t].view(-1, 1, 1, 1)
+
+                random_noise = torch.randn_like(x) if i > 1 else torch.zeros_like(x)
+
+                x = (
+                    (1 / sqrt_alpha_t)
+                    * (x - ((beta_t / sqrt_one_minus_alpha_hat_t) * eps_model(x, t)))
+                ) + (epsilon_t * random_noise)
+
+                if i % skip_steps == 0:
+                    x_img = F.interpolate(
+                        input=x, scale_factor=scale_factor, mode="nearest-exact"
+                    )
+                    x_img = ((x_img.clamp(-1, 1) + 1) * 127.5).type(torch.uint8)
+                    grid = torchvision.utils.make_grid(x_img)
+                    img_arr = grid.permute(1, 2, 0).cpu().numpy()
+                    img = Image.fromarray(img_arr)
+                    frames_list.append(img)
+
+        eps_model.train()
+
+        output_name = output_name if output_name else "output"
+        frames_list[0].save(
+            os.path.join(save_path, f"{output_name}.gif"),
+            save_all=True,
+            append_images=frames_list[1:],
+            optimize=False,
+            duration=80,
+            loop=0,
+        )
+
+
 class PositionalEncoding(nn.Module):
     def __init__(
         self,
-        time_dim: int,
         embedding_dim: int,
         dropout: float = 0.1,
         max_len: int = 1000,
         apply_dropout: bool = True,
     ):
-        """Positional encoding class for UNet3D model.
+        """Section 3.5 of attention is all you need paper.
+
+        Extended slicing method is used to fill even and odd position of sin, cos with increment of 2.
+        Ex, `[sin, cos, sin, cos, sin, cos]` for `embedding_dim = 6`.
+
+        `max_len` is equivalent to number of noise steps or patches. `embedding_dim` must same as image
+        embedding dimension of the model.
 
         Args:
-            time_dim: Number of time steps.
-            
-            dropout: Dropout probability.
-            max_len: Maximum length for positional encoding.
-            apply_dropout: Whether to apply dropoutembedding_dim: Dimension of positional embeddings..
+            embedding_dim: `d_model` in given positional encoding formula.
+            dropout: Dropout amount.
+            max_len: Number of embeddings to generate. Here, equivalent to total noise steps.
         """
         super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(p=dropout)
         self.apply_dropout = apply_dropout
 
-        # Calculate positional encoding
-        pos_encoding = torch.zeros(time_dim, max_len, embedding_dim)
-        position = torch.arange(max_len).unsqueeze(1)
+        pos_encoding = torch.zeros(max_len, embedding_dim)
+        position = torch.arange(start=0, end=max_len).unsqueeze(1)
         div_term = torch.exp(
             -math.log(10000.0)
             * torch.arange(0, embedding_dim, 2).float()
             / embedding_dim
         )
 
-        pos_encoding[:, :, 0::2] = torch.sin(position * div_term)
-        pos_encoding[:, :, 1::2] = torch.cos(position * div_term)
-
-        self.register_buffer("pos_encoding", pos_encoding)
+        pos_encoding[:, 0::2] = torch.sin(position * div_term)
+        pos_encoding[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer(name="pos_encoding", tensor=pos_encoding, persistent=False)
 
     def forward(self, t: torch.LongTensor) -> torch.Tensor:
-        """Get positional embeddings for given time steps.
-
-        Args:
-            t: Tensor containing time steps.
-
-        Returns:
-            torch.Tensor: Positional embeddings for the given time steps.
+        """Get precalculated positional embedding at timestep t. Outputs same as video implementation
+        code but embeddings are in [sin, cos, sin, cos] format instead of [sin, sin, cos, cos] in that code.
+        Also batch dimension is added to final output.
         """
-        # Retrieve positional encoding for given time steps
         positional_encoding = self.pos_encoding[t].squeeze(1)
-
         if self.apply_dropout:
             return self.dropout(positional_encoding)
         return positional_encoding
 
 
 class DoubleConv3D(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        mid_channels: int = None,
+        residual: bool = False,
+    ):
+        """Double convolutions as applied in the unet paper architecture."""
         super(DoubleConv3D, self).__init__()
+        self.residual = residual
+        if not mid_channels:
+            mid_channels = out_channels
+
         self.double_conv = nn.Sequential(
-            nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm3d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm3d(out_channels),
-            nn.ReLU(inplace=True),
+            nn.Conv3d(
+                in_channels=in_channels,
+                out_channels=mid_channels,
+                kernel_size=(3, 3, 3),
+                padding=(1, 1, 1),
+                bias=False,
+            ),
+            nn.GroupNorm(num_groups=1, num_channels=mid_channels),
+            nn.GELU(),
+            nn.Conv3d(
+                in_channels=mid_channels,
+                out_channels=out_channels,
+                kernel_size=(3, 3, 3),
+                padding=(1, 1, 1),
+                bias=False,
+            ),
+            nn.GroupNorm(num_groups=1, num_channels=out_channels),
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.residual:
+            return F.gelu(x + self.double_conv(x))
+
         return self.double_conv(x)
 
 
-class Down3D(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(Down3D, self).__init__()
+class Down(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, emb_dim: int = 256):
+        super(Down, self).__init__()
         self.maxpool_conv = nn.Sequential(
-            nn.MaxPool3d(2), DoubleConv3D(in_channels, out_channels)
+            nn.MaxPool3d(kernel_size=(2, 2, 2)),
+            DoubleConv3D(
+                in_channels=in_channels, out_channels=in_channels, residual=True
+            ),
+            DoubleConv3D(in_channels=in_channels, out_channels=out_channels),
         )
 
-    def forward(self, x):
-        return self.maxpool_conv(x)
-
-
-class Up3D(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(Up3D, self).__init__()
-        self.up = nn.ConvTranspose3d(
-            in_channels, in_channels // 2, kernel_size=2, stride=2
+        self.emb_layer = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(in_features=emb_dim, out_features=out_channels),
         )
-        self.conv = DoubleConv3D(in_channels, out_channels)
 
-    def forward(self, x1, x2):
-        x1 = self.up(x1)
-        # Adjust x1 size if needed to match x2
-        diffZ = x2.size()[2] - x1.size()[2]
-        diffY = x2.size()[3] - x1.size()[3]
-        diffX = x2.size()[4] - x1.size()[4]
-        x1 = nn.functional.pad(
-            x1,
-            (
-                diffX // 2,
-                diffX - diffX // 2,
-                diffY // 2,
-                diffY - diffY // 2,
-                diffZ // 2,
-                diffZ - diffZ // 2,
+    def forward(self, x: torch.Tensor, t_embedding: torch.Tensor) -> torch.Tensor:
+        """Downsamples input tensor, calculates embedding and adds embedding channel wise.
+
+        If, `x.shape == [4, 64, 64, 64]` and `out_channels = 128`, then max_conv outputs [4, 128, 32, 32] by
+        downsampling in h, w and outputting specified amount of feature maps/channels.
+
+        `t_embedding` is embedding of timestep of shape [batch, time_dim]. It is passed through embedding layer
+        to output channel dimentsion equivalent to channel dimension of x tensor, so they can be summbed elementwise.
+
+        Since emb_layer output needs to be summed its output is also `emb.shape == [4, 128]`. It needs to be converted
+        to 4D tensor, [4, 128, 1, 1]. Then the channel dimension is duplicated in all of `H x W` dimension to get
+        shape of [4, 128, 32, 32]. 128D vector is sample for each pixel position is image. Now the emb_layer output
+        is summed with max_conv output.
+        """
+        x = self.maxpool_conv(x)
+        emb = self.emb_layer(t_embedding)
+        emb = emb.view(emb.shape[0], emb.shape[1], 1 , 1, 1).repeat(
+            1, 1,x.shape[-3], x.shape[-2], x.shape[-1]
+        )
+        return x + emb
+
+
+class Up(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, emb_dim: int = 256):
+        super(Up, self).__init__()
+        self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
+        self.conv = nn.Sequential(
+            DoubleConv3D(
+                in_channels=in_channels, out_channels=in_channels, residual=True
+            ),
+            DoubleConv3D(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                mid_channels=in_channels // 2,
             ),
         )
-        x = torch.cat([x2, x1], dim=1)
-        return self.conv(x)
 
-
-class UNet3D(nn.Module):
-    def __init__(
-        self,
-        in_channels: int = 3,
-        out_channels: int = 3,
-        noise_steps: int = 1000,
-        time_dim: int = 256,
-        features: list = None,
-    ):
-        super(UNet3D, self).__init__()
-        if features is None:
-            features = [64, 128, 256, 512]
-        self.time_dim = time_dim
-        self.pos_encoding = PositionalEncoding(
-            time_dim=time_dim, embedding_dim=time_dim, max_len=noise_steps
+        self.emb_layer = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(in_features=emb_dim, out_features=out_channels),
         )
 
-        self.input_conv = DoubleConv3D(in_channels, 64)
-        self.down1 = Down3D(64, 128)
-        self.down2 = Down3D(128, 256)
-        self.down3 = Down3D(256, 256)
-
-        self.bottleneck = DoubleConv3D(256, 512)
-
-        self.up1 = Up3D(512, 256)
-        self.up2 = Up3D(256, 128)
-        self.up3 = Up3D(128, 64)
-
-        self.out_conv = nn.Conv3d(
-            in_channels=64, out_channels=out_channels, kernel_size=1
+    def forward(
+        self, x: torch.Tensor, x_skip: torch.Tensor, t_embedding: torch.Tensor
+    ) -> torch.Tensor:
+        x = self.up(x)
+        x = torch.cat([x_skip, x], dim=1)
+        x = self.conv(x)
+        emb = self.emb_layer(t_embedding)
+        emb = emb.view(emb.shape[0], emb.shape[1], 1 , 1, 1).repeat(
+            1, 1,x.shape[-3], x.shape[-2], x.shape[-1]
         )
+        return x + emb
 
-    def forward(self, x: torch.Tensor, t: torch.LongTensor) -> torch.Tensor:
-        """Forward pass with image tensor and timestep reduce noise.
-
-        Args:
-            x: Image tensor of shape, [batch_size, channels, depth, height, width].
-            t: Time step defined as long integer. If batch size is 4, noise step 500, then random timesteps t = [10, 26, 460, 231].
-        """
-        t = self.pos_encoding(t)
-
-        x1 = self.input_conv(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
-
-        x = self.bottleneck(x4)
-
-        x = self.up1(x, x3)
-        x = self.up2(x, x2)
-        x = self.up3(x, x1)
-
-        return self.out_conv(x)
 
 class TransformerEncoderSA(nn.Module):
     def __init__(self, num_channels: int, size: int, num_heads: int = 4):
@@ -368,6 +421,77 @@ class TransformerEncoderSA(nn.Module):
         return attention_value.permute(0, 2, 1).view(
             -1, self.num_channels, self.size, self.size
         )
+
+
+class UNet(nn.Module):
+    def __init__(
+        self,
+        in_channels: int = 3,
+        out_channels: int = 3,
+        noise_steps: int = 1000,
+        time_dim: int = 256,
+        features: list = None,
+    ):
+        super(UNet, self).__init__()
+        if features is None:
+            features = [64, 128, 256, 512]
+        self.time_dim = time_dim
+        self.pos_encoding = PositionalEncoding(
+            embedding_dim=time_dim, max_len=noise_steps
+        )
+
+        self.input_conv = DoubleConv3D(in_channels, 64)
+        self.down1 = Down(64, 128)
+        self.sa1 = TransformerEncoderSA(128, 32)
+        self.down2 = Down(128, 256)
+        self.sa2 = TransformerEncoderSA(256, 16)
+        self.down3 = Down(256, 256)
+        self.sa3 = TransformerEncoderSA(256, 8)
+
+        self.bottleneck1 = DoubleConv3D(256, 512)
+        self.bottleneck2 = DoubleConv3D(512, 512)
+        self.bottleneck3 = DoubleConv3D(512, 256)
+
+        self.up1 = Up(512, 128)
+        self.sa4 = TransformerEncoderSA(128, 16)
+        self.up2 = Up(256, 64)
+        self.sa5 = TransformerEncoderSA(64, 32)
+        self.up3 = Up(128, 64)
+        self.sa6 = TransformerEncoderSA(64, 64)
+        self.out_conv = nn.Conv2d(
+            in_channels=64, out_channels=out_channels, kernel_size=(1, 1)
+        )
+
+    def forward(self, x: torch.Tensor, t: torch.LongTensor) -> torch.Tensor:
+        """Forward pass with image tensor and timestep reduce noise.
+
+        Args:
+            x: Image tensor of shape, [batch_size, channels, height, width].
+            t: Time step defined as long integer. If batch size is 4, noise step 500, then random timesteps t = [10, 26, 460, 231].
+        """
+        t = self.pos_encoding(t)
+
+        x1 = self.input_conv(x)
+        x2 = self.down1(x1, t)
+        x2 = self.sa1(x2)
+        x3 = self.down2(x2, t)
+        x3 = self.sa2(x3)
+        x4 = self.down3(x3, t)
+        x4 = self.sa3(x4)
+
+        x4 = self.bottleneck1(x4)
+        x4 = self.bottleneck2(x4)
+        x4 = self.bottleneck3(x4)
+
+        x = self.up1(x4, x3, t)
+        x = self.sa4(x)
+        x = self.up2(x, x2, t)
+        x = self.sa5(x)
+        x = self.up3(x, x1, t)
+        x = self.sa6(x)
+
+        return self.out_conv(x)
+
 
 class EMA:
     def __init__(self, beta):
@@ -420,7 +544,7 @@ class Tester:
         self.image_size = image_size
 
     def test_unet(self) -> None:
-        net = UNet3D().to(self.device)
+        net = UNet().to(self.device)
         print(f"Param count: {sum([p.numel() for p in net.parameters()])}")
         x = torch.randn(self.batch_size, 3, self.image_size, self.image_size)
         current_timestep = 500
@@ -443,7 +567,7 @@ class Tester:
         print(f"Self attention output shape: {output.shape}")
 
     def test_jit(self) -> None:
-        net = torch.jit.script(UNet3D().to(self.device))
+        net = torch.jit.script(UNet().to(self.device))
         print(f"Param count: {sum([p.numel() for p in net.parameters()])}")
         x = torch.randn(self.batch_size, 3, self.image_size, self.image_size)
         current_timestep = 500
@@ -515,76 +639,6 @@ class Utils:
             grad_scaler.load_state_dict(checkpoint["grad_scaler"])
         return checkpoint["epoch"]
 
-
-def normalized_cross_correlation(x, y, return_map, reduction="mean", eps=1e-8):
-    """N-dimensional normalized cross correlation (NCC)
-
-    Args:
-        x (~torch.Tensor): Input tensor.
-        y (~torch.Tensor): Input tensor.
-        return_map (bool): If True, also return the correlation map.
-        reduction (str, optional): Specifies the reduction to apply to the output:
-            ``'mean'`` | ``'sum'``. Defaults to ``'sum'``.
-        eps (float, optional): Epsilon value for numerical stability. Defaults to 1e-8.
-
-    Returns:
-        ~torch.Tensor: Output scalar
-        ~torch.Tensor: Output tensor
-    """
-
-    shape = x.shape
-    b = shape[0]
-
-    # reshape
-    x = x.reshape(b, -1)
-    y = y.reshape(b, -1)
-
-    # mean
-    x_mean = torch.mean(x, dim=1, keepdim=True)
-    y_mean = torch.mean(y, dim=1, keepdim=True)
-
-    # deviation
-    x = x - x_mean
-    y = y - y_mean
-
-    dev_xy = torch.mul(x, y)
-    dev_xx = torch.mul(x, x)
-    dev_yy = torch.mul(y, y)
-
-    dev_xx_sum = torch.sum(dev_xx, dim=1, keepdim=True)
-    dev_yy_sum = torch.sum(dev_yy, dim=1, keepdim=True)
-
-    ncc = torch.div(
-        dev_xy + eps / dev_xy.shape[1],
-        torch.sqrt(torch.mul(dev_xx_sum, dev_yy_sum)) + eps,
-    )
-    ncc_map = ncc.view(b, *shape[1:])
-
-    # reduce
-    if reduction == "mean":
-        ncc = torch.mean(torch.sum(ncc, dim=1))
-    elif reduction == "sum":
-        ncc = torch.sum(ncc)
-    else:
-        raise KeyError("unsupported reduction type: %s" % reduction)
-
-    if not return_map:
-        return ncc
-
-    return ncc, ncc_map
-
-
-def ncc_loss(predicted_noise, noise, reduction="mean"):
-    """
-    Both the return outputs of the normalized_cross_correlation function are of type torch.Tensor(), so no type conversion required
-    """
-    ncc_val, _ = normalized_cross_correlation(
-        predicted_noise, noise, return_map=True, reduction=reduction
-    )
-
-    return ncc_val
-
-
 class Trainer:
     def __init__(
         self,
@@ -633,7 +687,7 @@ class Trainer:
                 collate_fn=Utils.collate_fn,
             )
 
-        self.unet_model = UNet3D().to(device)
+        self.unet_model = UNet().to(device)
         self.diffusion = Diffusion(
             img_size=image_size, device=self.device, noise_steps=noise_steps
         )
@@ -658,21 +712,21 @@ class Trainer:
         # )
 
         self.start_epoch = 0
-        # if checkpoint_path:
-        #     logging.info(f"Loading model weights...")
-        #     self.start_epoch = Utils.load_checkpoint(
-        #         model=self.unet_model,
-        #         optimizer=self.optimizer,
-        #         scheduler=self.scheduler,
-        #         grad_scaler=self.grad_scaler,
-        #         filename=checkpoint_path,
-        #     )
-        # if checkpoint_path_ema:
-        #     logging.info(f"Loading EMA model weights...")
-        #     _ = Utils.load_checkpoint(
-        #         model=self.ema_model,
-        #         filename=checkpoint_path_ema,
-        #     )
+        if checkpoint_path:
+            logging.info(f"Loading model weights...")
+            self.start_epoch = Utils.load_checkpoint(
+                model=self.unet_model,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                grad_scaler=self.grad_scaler,
+                filename=checkpoint_path,
+            )
+        if checkpoint_path_ema:
+            logging.info(f"Loading EMA model weights...")
+            _ = Utils.load_checkpoint(
+                model=self.ema_model,
+                filename=checkpoint_path_ema,
+            )
 
     def sample(
         self,
@@ -704,13 +758,31 @@ class Trainer:
             save_path=os.path.join(self.save_path, ema_model_name),
         )
 
+    def sample_gif(
+        self,
+        save_path: str = "",
+        sample_count: int = 1,
+        output_name: str = None,
+    ) -> None:
+        """Generates images with reverse process based on sampling method with both training model and ema model."""
+        self.diffusion.generate_gif(
+            eps_model=self.unet_model,
+            n=sample_count,
+            save_path=save_path,
+            output_name=output_name,
+        )
+        self.diffusion.generate_gif(
+            eps_model=self.ema_model,
+            n=sample_count,
+            save_path=save_path,
+            output_name=f"{output_name}_ema",
+        )
+
     def train(self) -> None:
         logging.info(f"Training started....")
         for epoch in range(self.start_epoch, self.num_epochs):
-
-            print(
-                f"Epoch: {epoch}", file=sys.stderr
-            )  # printing into the err.log file rather than the out.log
+            
+            print(f"Epoch: {epoch}", file=sys.stderr) # printing into the err.log file rather than the out.log
             total_loss = 0.0
             accumulated_minibatch_loss = 0.0
 
@@ -748,13 +820,9 @@ class Trainer:
                         # else:
                         #     self.scheduler.step()
 
-                        total_loss += (
-                            float(accumulated_minibatch_loss)
-                            / len(self.train_loader)
-                            * self.accumulation_iters
-                        )
+                        total_loss += (float(accumulated_minibatch_loss) / len(self.train_loader) * self.accumulation_iters)
                         pbar.set_description(
-                            f"Loss minibatch: {float(accumulated_minibatch_loss):.4f}, total: {total_loss:.4f}"
+                            f'Loss minibatch: {float(accumulated_minibatch_loss):.4f}, total: {total_loss:.4f}'
                             # f"Loss minibatch: {float(accumulated_minibatch_loss):.4f}"
                         )
                         accumulated_minibatch_loss = 0.0

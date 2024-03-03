@@ -1,21 +1,4 @@
-"""Implementation of DDPM.
-
-Best to use corrupted, low res image mover script first then use batch image resizer to resize image
-to expected format before using this.
-
-References
-    - DDPM paper, https://arxiv.org/pdf/2006.11239.pdf.
-    - DDIM paper, https://arxiv.org/pdf/2010.02502.pdf.
-    - Annotated Diffusion, https://huggingface.co/blog/annotated-diffusion.
-    - Keras DDIM, https://keras.io/examples/generative/ddim/.
-    - Implementation, https://www.youtube.com/watch?v=TBCRlnwJtZU.
-    - Implementation, https://github.com/dome272/Diffusion-Models-pytorch.
-    - Postional embedding, http://nlp.seas.harvard.edu/annotated-transformer/.
-    - Attention paper, https://arxiv.org/pdf/1706.03762.pdf.
-    - Transformers, https://pytorch.org/tutorials/beginner/transformer_tutorial.html.
-    - Transformer encoder architecture, https://arxiv.org/pdf/2010.11929.pdf.
-    - UNet architecture, https://arxiv.org/pdf/1505.04597.pdf.
-"""
+# Using torch.nn.DataParallel
 
 import copy
 import math
@@ -345,8 +328,8 @@ class Down(nn.Module):
         """
         x = self.maxpool_conv(x)
         emb = self.emb_layer(t_embedding)
-        emb = emb.view(emb.shape[0], emb.shape[1], 1 , 1, 1).repeat(
-            1, 1,x.shape[-3], x.shape[-2], x.shape[-1]
+        emb = emb.view(emb.shape[0], emb.shape[1], 1, 1, 1).repeat(
+            1, 1, x.shape[-3], x.shape[-2], x.shape[-1]
         )
         return x + emb
 
@@ -378,8 +361,8 @@ class Up(nn.Module):
         x = torch.cat([x_skip, x], dim=1)
         x = self.conv(x)
         emb = self.emb_layer(t_embedding)
-        emb = emb.view(emb.shape[0], emb.shape[1], 1 , 1, 1).repeat(
-            1, 1,x.shape[-3], x.shape[-2], x.shape[-1]
+        emb = emb.view(emb.shape[0], emb.shape[1], 1, 1, 1).repeat(
+            1, 1, x.shape[-3], x.shape[-2], x.shape[-1]
         )
         return x + emb
 
@@ -458,8 +441,8 @@ class UNet(nn.Module):
         self.sa5 = TransformerEncoderSA(64, 32)
         self.up3 = Up(128, 64)
         self.sa6 = TransformerEncoderSA(64, 64)
-        self.out_conv = nn.Conv2d(
-            in_channels=64, out_channels=out_channels, kernel_size=(1, 1)
+        self.out_conv = nn.Conv3d(
+            in_channels=64, out_channels=out_channels, kernel_size=(1, 1 ,1)
         )
 
     def forward(self, x: torch.Tensor, t: torch.LongTensor) -> torch.Tensor:
@@ -470,14 +453,21 @@ class UNet(nn.Module):
             t: Time step defined as long integer. If batch size is 4, noise step 500, then random timesteps t = [10, 26, 460, 231].
         """
         t = self.pos_encoding(t)
-
+        print(f'Shape of input: {x.shape}')
         x1 = self.input_conv(x)
+        print(f'Shape after input conv: {x1.shape}')
         x2 = self.down1(x1, t)
+        print(f"Shape after down1: {x2.shape}")
         x2 = self.sa1(x2)
+        print(f"Shape after sa1: {x2.shape}")
         x3 = self.down2(x2, t)
+        print(f"Shape after down2: {x3.shape}")
         x3 = self.sa2(x3)
+        print(f"Shape after sa2: {x3.shape}")
         x4 = self.down3(x3, t)
+        print(f'Shape after down3: {x4.shape}')
         x4 = self.sa3(x4)
+        print(f"Shape after sa3: {x4.shape}")
 
         x4 = self.bottleneck1(x4)
         x4 = self.bottleneck2(x4)
@@ -639,6 +629,7 @@ class Utils:
             grad_scaler.load_state_dict(checkpoint["grad_scaler"])
         return checkpoint["epoch"]
 
+
 class Trainer:
     def __init__(
         self,
@@ -649,7 +640,7 @@ class Trainer:
         run_name: str = "ddpm",
         image_size: int = 64,
         image_channels: int = 3,
-        batch_size: int = 16,
+        batch_size: int = 1,
         accumulation_iters: int = 64,
         sample_count: int = 1,
         num_workers: int = 0,
@@ -688,6 +679,7 @@ class Trainer:
             )
 
         self.unet_model = UNet().to(device)
+        self.unet_model = torch.nn.DataParallel(self.unet_model, device_ids=[0, 1, 2, 3])
         self.diffusion = Diffusion(
             img_size=image_size, device=self.device, noise_steps=noise_steps
         )
@@ -698,18 +690,10 @@ class Trainer:
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
             optimizer=self.optimizer, T_max=300
         )
-        # self.loss_fn = nn.MSELoss().to(self.device)
         self.grad_scaler = GradScaler()
 
         self.ema = EMA(beta=0.95)
         self.ema_model = copy.deepcopy(self.unet_model).eval().requires_grad_(False)
-
-        # ema_avg = lambda avg_model_param, model_param, num_averaged: 0.1 * avg_model_param + 0.9 * model_param
-        # self.swa_model = optim.swa_utils.AveragedModel(model=self.unet_model, avg_fn=ema_avg).to(self.device)
-        # self.swa_start = 10
-        # self.swa_scheduler = optim.swa_utils.SWALR(
-        #     optimizer=self.optimizer, swa_lr=0.05, anneal_epochs=10, anneal_strategy='cos'
-        # )
 
         self.start_epoch = 0
         if checkpoint_path:
@@ -781,14 +765,15 @@ class Trainer:
     def train(self) -> None:
         logging.info(f"Training started....")
         for epoch in range(self.start_epoch, self.num_epochs):
-            
-            print(f"Epoch: {epoch}", file=sys.stderr) # printing into the err.log file rather than the out.log
+
+            print(
+                f"Epoch: {epoch}", file=sys.stderr
+            )  # printing into the err.log file rather than the out.log
             total_loss = 0.0
             accumulated_minibatch_loss = 0.0
 
             with tqdm(self.train_loader) as pbar:
                 for batch_idx, batch_data in enumerate(pbar):
-                    #real_images = real_images.to(self.device)
                     real_images = batch_data.to(self.device)
                     current_batch_size = real_images.shape[0]
                     t = self.diffusion.sample_timesteps(batch_size=current_batch_size)
@@ -805,7 +790,6 @@ class Trainer:
 
                     self.grad_scaler.scale(loss).backward()
 
-                    # if ((batch_idx + 1) % self.accumulation_iters == 0) or ((batch_idx + 1) == len(self.train_loader)):
                     if (batch_idx + 1) % self.accumulation_iters == 0:
                         self.grad_scaler.step(self.optimizer)
                         self.grad_scaler.update()
@@ -813,16 +797,14 @@ class Trainer:
                         self.ema.ema_step(
                             ema_model=self.ema_model, model=self.unet_model
                         )
-
-                        # if epoch > self.swa_start:
-                        #     self.swa_model.update_parameters(model=self.unet_model)
-                        #     self.swa_scheduler.step()
-                        # else:
-                        #     self.scheduler.step()
-
-                        total_loss += (float(accumulated_minibatch_loss) / len(self.train_loader) * self.accumulation_iters)
+                        
+                        total_loss += (
+                            float(accumulated_minibatch_loss)
+                            / len(self.train_loader)
+                            * self.accumulation_iters
+                        )
                         pbar.set_description(
-                            f'Loss minibatch: {float(accumulated_minibatch_loss):.4f}, total: {total_loss:.4f}'
+                            f"Loss minibatch: {float(accumulated_minibatch_loss):.4f}, total: {total_loss:.4f}"
                             # f"Loss minibatch: {float(accumulated_minibatch_loss):.4f}"
                         )
                         accumulated_minibatch_loss = 0.0
