@@ -368,13 +368,14 @@ class Up(nn.Module):
 
 
 class TransformerEncoderSA(nn.Module):
-    def __init__(self, num_channels: int, size: int, num_heads: int = 4):
+    def __init__(self, num_channels: int, size: int, frames:int, num_heads: int = 4):
         """A block of transformer encoder with mutli head self attention from vision transformers paper,
         https://arxiv.org/pdf/2010.11929.pdf.
         """
         super(TransformerEncoderSA, self).__init__()
         self.num_channels = num_channels
         self.size = size
+        self.frames = frames
         self.mha = nn.MultiheadAttention(
             embed_dim=num_channels, num_heads=num_heads, batch_first=True
         )
@@ -396,13 +397,13 @@ class TransformerEncoderSA(nn.Module):
         Before returning attention output is converted back input feature map x shape. Opposite of feature map to
         mha input is done which gives output [4, 128, 32, 32].
         """
-        x = x.view(-1, self.num_channels, self.size * self.size).permute(0, 2, 1)
+        x = x.view(-1, self.num_channels, self.frames * self.size * self.size).permute(0, 2, 1)
         x_ln = self.ln(x)
         attention_value, _ = self.mha(query=x_ln, key=x_ln, value=x_ln)
         attention_value = attention_value + x
         attention_value = self.ff_self(attention_value) + attention_value
         return attention_value.permute(0, 2, 1).view(
-            -1, self.num_channels, self.size, self.size
+            -1, self.num_channels,self.frames, self.size, self.size
         )
 
 
@@ -425,22 +426,22 @@ class UNet(nn.Module):
 
         self.input_conv = DoubleConv3D(in_channels, 64)
         self.down1 = Down(64, 128)
-        self.sa1 = TransformerEncoderSA(128, 32)
+        self.sa1 = TransformerEncoderSA(128, 80, 40)
         self.down2 = Down(128, 256)
-        self.sa2 = TransformerEncoderSA(256, 16)
+        self.sa2 = TransformerEncoderSA(256, 40, 20)
         self.down3 = Down(256, 256)
-        self.sa3 = TransformerEncoderSA(256, 8)
+        self.sa3 = TransformerEncoderSA(256, 20, 10)
 
         self.bottleneck1 = DoubleConv3D(256, 512)
         self.bottleneck2 = DoubleConv3D(512, 512)
         self.bottleneck3 = DoubleConv3D(512, 256)
 
         self.up1 = Up(512, 128)
-        self.sa4 = TransformerEncoderSA(128, 16)
+        self.sa4 = TransformerEncoderSA(128, 40, 20)
         self.up2 = Up(256, 64)
-        self.sa5 = TransformerEncoderSA(64, 32)
+        self.sa5 = TransformerEncoderSA(64, 80, 40)
         self.up3 = Up(128, 64)
-        self.sa6 = TransformerEncoderSA(64, 64)
+        self.sa6 = TransformerEncoderSA(64, 160, 80)
         self.out_conv = nn.Conv3d(
             in_channels=64, out_channels=out_channels, kernel_size=(1, 1 ,1)
         )

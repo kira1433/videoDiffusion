@@ -13,6 +13,7 @@ class CustomVideoDataset(Dataset):
         super(CustomVideoDataset, self).__init__()
         self.videos = np.load(npy_path)
         self.videos = self.videos.transpose(0, 2, 1, 3, 4)
+        self.videos = self.videos[:, :, :80, :, :]
 
     def __len__(self) -> int:
         return self.videos.shape[0]
