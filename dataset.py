@@ -15,6 +15,7 @@ class CustomVideoDataset(Dataset):
         self.videos = np.load(npy_path)
         pool = nn.AvgPool3d((1, 2, 2), stride=(1, 2, 2))
         self.videos = pool(torch.tensor(self.videos)).numpy()
+        self.videos = pool(torch.tensor(self.videos)).numpy()
         self.videos = self.videos.transpose(0, 2, 1, 3, 4)
         self.videos = self.videos[:, :, :8, :, :]
 

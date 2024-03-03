@@ -366,7 +366,7 @@ class Up(nn.Module):
 
 
 class TransformerEncoderSA(nn.Module):
-    def __init__(self, num_channels: int, size: int, frames:int, num_heads: int = 4):
+    def __init__(self, num_channels: int, size: int, frames:int, num_heads: int = 1):
         """A block of transformer encoder with mutli head self attention from vision transformers paper,
         https://arxiv.org/pdf/2010.11929.pdf.
         """
@@ -416,32 +416,32 @@ class UNet(nn.Module):
     ):
         super(UNet, self).__init__()
         if features is None:
-            features = [64, 128, 256, 512]
+            features = [32, 64, 128, 256]
         self.time_dim = time_dim
         self.pos_encoding = PositionalEncoding(
             embedding_dim=time_dim, max_len=noise_steps
         )
 
-        self.input_conv = DoubleConv3D(in_channels, 64)
-        self.down1 = Down(64, 128)
-        self.sa1 = TransformerEncoderSA(128, 40, 4)
-        self.down2 = Down(128, 256)
-        self.sa2 = TransformerEncoderSA(256, 20, 2)
-        self.down3 = Down(256, 256)
-        self.sa3 = TransformerEncoderSA(256, 10, 1)
+        self.input_conv = DoubleConv3D(in_channels, 32)
+        self.down1 = Down(32, 64)
+        self.sa1 = TransformerEncoderSA(64, 20, 4)
+        self.down2 = Down(64, 128)
+        self.sa2 = TransformerEncoderSA(128, 10, 2)
+        self.down3 = Down(128, 128)
+        self.sa3 = TransformerEncoderSA(128, 5, 1)
 
-        self.bottleneck1 = DoubleConv3D(256, 512)
-        self.bottleneck2 = DoubleConv3D(512, 512)
-        self.bottleneck3 = DoubleConv3D(512, 256)
+        self.bottleneck1 = DoubleConv3D(128, 256)
+        self.bottleneck2 = DoubleConv3D(256, 256)
+        self.bottleneck3 = DoubleConv3D(256, 128)
 
-        self.up1 = Up(512, 128)
-        self.sa4 = TransformerEncoderSA(128, 20, 2)
-        self.up2 = Up(256, 64)
-        self.sa5 = TransformerEncoderSA(64, 40, 4)
-        self.up3 = Up(128, 64)
-        self.sa6 = TransformerEncoderSA(64, 80, 8)
+        self.up1 = Up(256, 64)
+        self.sa4 = TransformerEncoderSA(64, 10, 2)
+        self.up2 = Up(128, 32)
+        self.sa5 = TransformerEncoderSA(32, 20, 4)
+        self.up3 = Up(64, 32)
+        self.sa6 = TransformerEncoderSA(32, 40, 8)
         self.out_conv = nn.Conv3d(
-            in_channels=64, out_channels=out_channels, kernel_size=(1, 1 ,1)
+            in_channels=32, out_channels=out_channels, kernel_size=(1, 1 ,1)
         )
 
     def forward(self, x: torch.Tensor, t: torch.LongTensor) -> torch.Tensor:
@@ -487,7 +487,9 @@ class UNet(nn.Module):
         print(f"Shape after up3: {x.shape}")
         x = self.sa6(x)
         print(f"Shape after sa6: {x.shape}")
-        return self.out_conv(x)
+        x = self.out_conv(x)
+        print(f"Shape after out_conv: {x.shape}")
+        return x
 
 
 class EMA:
