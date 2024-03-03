@@ -25,7 +25,7 @@ class CustomVideoDataset(Dataset):
     def __getitem__(self, idx: int) -> torch.Tensor:
         return self.videos[idx]
 
-data = CustomVideoDataset("./data_108.npy")
-print(data.__getitem__(0).shape)
-print(type(data.__getitem__(0)))
+# data = CustomVideoDataset("./data_108.npy")
+# print(data.__getitem__(0).shape)
+# print(type(data.__getitem__(0)))
 

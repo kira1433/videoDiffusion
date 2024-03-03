@@ -398,43 +398,25 @@ class UNet(nn.Module):
             t: Time step defined as long integer. If batch size is 4, noise step 500, then random timesteps t = [10, 26, 460, 231].
         """
         t = self.pos_encoding(t)
-        print(f'Shape of input: {x.shape}')
         x1 = self.input_conv(x)
-        print(f'Shape after input conv: {x1.shape}')
         x2 = self.down1(x1, t)
-        print(f"Shape after down1: {x2.shape}")
         x2 = self.sa1(x2)
-        print(f"Shape after sa1: {x2.shape}")
         x3 = self.down2(x2, t)
-        print(f"Shape after down2: {x3.shape}")
         x3 = self.sa2(x3)
-        print(f"Shape after sa2: {x3.shape}")
         x4 = self.down3(x3, t)
-        print(f'Shape after down3: {x4.shape}')
         x4 = self.sa3(x4)
-        print(f"Shape after sa3: {x4.shape}")
 
         x4 = self.bottleneck1(x4)
-        print(f"Shape after bottleneck1: {x4.shape}")
         x4 = self.bottleneck2(x4)
-        print(f"Shape after bottleneck2: {x4.shape}")
         x4 = self.bottleneck3(x4)
-        print(f"Shape after bottleneck3: {x4.shape}")
 
         x = self.up1(x4, x3, t)
-        print(f"Shape after up1: {x.shape}")
         x = self.sa4(x)
-        print(f"Shape after sa4: {x.shape}")
         x = self.up2(x, x2, t)
-        print(f"Shape after up2: {x.shape}")
         x = self.sa5(x)
-        print(f"Shape after sa5: {x.shape}")
         x = self.up3(x, x1, t)
-        print(f"Shape after up3: {x.shape}")
         x = self.sa6(x)
-        print(f"Shape after sa6: {x.shape}")
         x = self.out_conv(x)
-        print(f"Shape after out_conv: {x.shape}")
         return x
 
 
@@ -537,12 +519,13 @@ class Utils:
 
     @staticmethod
     def save_images(videos: torch.Tensor, save_path: str) -> None:
+        pathlib.Path(save_path).mkdir(parents=True, exist_ok=True)
         for i in range(8):
             images = videos[:, :, i, :, :]
             grid = torchvision.utils.make_grid(images)
             img_arr = grid.permute(1, 2, 0).cpu().numpy()
             img = Image.fromarray(img_arr)
-            img.save(save_path)
+            img.save(os.path.join(save_path, f"frame_{i}.jpg"))
 
     @staticmethod
     def save_checkpoint(
@@ -681,12 +664,12 @@ class Trainer:
             eps_model=self.ema_model, n=sample_count
         )
 
-        model_name = f"model_{epoch}_{batch_idx}.jpg"
-        ema_model_name = f"model_ema_{epoch}_{batch_idx}.jpg"
+        model_name = f"model_{epoch}_{batch_idx}"
+        ema_model_name = f"model_ema_{epoch}_{batch_idx}"
 
         if output_name:
-            model_name = f"{output_name}.jpg"
-            ema_model_name = f"{output_name}_ema.jpg"
+            model_name = f"{output_name}"
+            ema_model_name = f"{output_name}_ema"
 
         Utils.save_images(
             videos=sampled_images, save_path=os.path.join(self.save_path, model_name)
@@ -739,7 +722,6 @@ class Trainer:
                         )
                         pbar.set_description(
                             f"Loss minibatch: {float(accumulated_minibatch_loss):.4f}, total: {total_loss:.4f}"
-                            # f"Loss minibatch: {float(accumulated_minibatch_loss):.4f}"
                         )
                         accumulated_minibatch_loss = 0.0
 
@@ -768,12 +750,16 @@ class Trainer:
                             ),
                         )
 
+
+            print(
+                f"Epoch: {epoch} , loss: {total_loss}"
+            ) 
             self.scheduler.step()
 
 
 if __name__ == "__main__":
     trainer = Trainer(
         dataset_path=r"./data_108.npy",
-        save_path=r"./checkpoints3d/",
+        save_path=r"./results/",
     )
     trainer.train()
