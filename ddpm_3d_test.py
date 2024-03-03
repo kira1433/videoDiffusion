@@ -32,7 +32,6 @@ class Diffusion:
     def __init__(
         self,
         device: str,
-        img_size: int,
         noise_steps: int = 1000,
         beta_start: float = 1e-4,
         beta_end: float = 0.02,
@@ -41,7 +40,6 @@ class Diffusion:
         self.noise_steps = noise_steps
         self.beta_start = beta_start
         self.beta_end = beta_end
-        self.img_size = img_size
 
         # Section 2, equation 4 and near explation for alpha, alpha hat, beta.
         self.beta = self.linear_noise_schedule()
@@ -337,7 +335,7 @@ class Down(nn.Module):
 class Up(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, emb_dim: int = 256):
         super(Up, self).__init__()
-        self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
+        self.up = nn.Upsample(scale_factor=2, mode="trilinear", align_corners=True)
         self.conv = nn.Sequential(
             DoubleConv3D(
                 in_channels=in_channels, out_channels=in_channels, residual=True
@@ -426,22 +424,22 @@ class UNet(nn.Module):
 
         self.input_conv = DoubleConv3D(in_channels, 64)
         self.down1 = Down(64, 128)
-        self.sa1 = TransformerEncoderSA(128, 80, 40)
+        self.sa1 = TransformerEncoderSA(128, 40, 4)
         self.down2 = Down(128, 256)
-        self.sa2 = TransformerEncoderSA(256, 40, 20)
+        self.sa2 = TransformerEncoderSA(256, 20, 2)
         self.down3 = Down(256, 256)
-        self.sa3 = TransformerEncoderSA(256, 20, 10)
+        self.sa3 = TransformerEncoderSA(256, 10, 1)
 
         self.bottleneck1 = DoubleConv3D(256, 512)
         self.bottleneck2 = DoubleConv3D(512, 512)
         self.bottleneck3 = DoubleConv3D(512, 256)
 
         self.up1 = Up(512, 128)
-        self.sa4 = TransformerEncoderSA(128, 40, 20)
+        self.sa4 = TransformerEncoderSA(128, 20, 2)
         self.up2 = Up(256, 64)
-        self.sa5 = TransformerEncoderSA(64, 80, 40)
+        self.sa5 = TransformerEncoderSA(64, 40, 4)
         self.up3 = Up(128, 64)
-        self.sa6 = TransformerEncoderSA(64, 160, 80)
+        self.sa6 = TransformerEncoderSA(64, 80, 8)
         self.out_conv = nn.Conv3d(
             in_channels=64, out_channels=out_channels, kernel_size=(1, 1 ,1)
         )
@@ -471,16 +469,24 @@ class UNet(nn.Module):
         print(f"Shape after sa3: {x4.shape}")
 
         x4 = self.bottleneck1(x4)
+        print(f"Shape after bottleneck1: {x4.shape}")
         x4 = self.bottleneck2(x4)
+        print(f"Shape after bottleneck2: {x4.shape}")
         x4 = self.bottleneck3(x4)
+        print(f"Shape after bottleneck3: {x4.shape}")
 
         x = self.up1(x4, x3, t)
+        print(f"Shape after up1: {x.shape}")
         x = self.sa4(x)
+        print(f"Shape after sa4: {x.shape}")
         x = self.up2(x, x2, t)
+        print(f"Shape after up2: {x.shape}")
         x = self.sa5(x)
+        print(f"Shape after sa5: {x.shape}")
         x = self.up3(x, x1, t)
+        print(f"Shape after up3: {x.shape}")
         x = self.sa6(x)
-
+        print(f"Shape after sa6: {x.shape}")
         return self.out_conv(x)
 
 
@@ -639,8 +645,6 @@ class Trainer:
         checkpoint_path: str = None,
         checkpoint_path_ema: str = None,
         run_name: str = "ddpm",
-        image_size: int = 64,
-        image_channels: int = 3,
         batch_size: int = 1,
         accumulation_iters: int = 64,
         sample_count: int = 1,
@@ -680,9 +684,8 @@ class Trainer:
             )
 
         self.unet_model = UNet().to(device)
-        self.unet_model = torch.nn.DataParallel(self.unet_model, device_ids=[0, 1, 2, 3])
         self.diffusion = Diffusion(
-            img_size=image_size, device=self.device, noise_steps=noise_steps
+            device=self.device, noise_steps=noise_steps
         )
         self.optimizer = optim.Adam(
             params=self.unet_model.parameters(),
