@@ -124,7 +124,7 @@ class Diffusion:
 
         eps_model.eval()
         with torch.no_grad():
-            x = torch.randn((n, 3, self.img_size, self.img_size), device=self.device)
+            x = torch.randn((n, 3, 8, 40, 40 ), device=self.device)
 
             for i in tqdm(reversed(range(1, self.noise_steps)), position=0):
                 t = torch.ones(n, dtype=torch.long, device=self.device) * i
@@ -149,60 +149,6 @@ class Diffusion:
         x = F.interpolate(input=x, scale_factor=scale_factor, mode="nearest-exact")
         return x
 
-    def generate_gif(
-        self,
-        eps_model: nn.Module,
-        n: int = 1,
-        save_path: str = "",
-        output_name: str = None,
-        skip_steps: int = 20,
-        scale_factor: int = 2,
-    ) -> None:
-        logging.info(f"Generating gif....")
-        frames_list = []
-
-        eps_model.eval()
-        with torch.no_grad():
-            x = torch.randn((n, 3, self.img_size, self.img_size), device=self.device)
-
-            for i in tqdm(reversed(range(1, self.noise_steps)), position=0):
-                t = torch.ones(n, dtype=torch.long, device=self.device) * i
-
-                sqrt_alpha_t = self.sqrt_alpha[t].view(-1, 1, 1, 1)
-                beta_t = self.beta[t].view(-1, 1, 1, 1)
-                sqrt_one_minus_alpha_hat_t = self.sqrt_one_minus_alpha_hat[t].view(
-                    -1, 1, 1, 1
-                )
-                epsilon_t = self.std_beta[t].view(-1, 1, 1, 1)
-
-                random_noise = torch.randn_like(x) if i > 1 else torch.zeros_like(x)
-
-                x = (
-                    (1 / sqrt_alpha_t)
-                    * (x - ((beta_t / sqrt_one_minus_alpha_hat_t) * eps_model(x, t)))
-                ) + (epsilon_t * random_noise)
-
-                if i % skip_steps == 0:
-                    x_img = F.interpolate(
-                        input=x, scale_factor=scale_factor, mode="nearest-exact"
-                    )
-                    x_img = ((x_img.clamp(-1, 1) + 1) * 127.5).type(torch.uint8)
-                    grid = torchvision.utils.make_grid(x_img)
-                    img_arr = grid.permute(1, 2, 0).cpu().numpy()
-                    img = Image.fromarray(img_arr)
-                    frames_list.append(img)
-
-        eps_model.train()
-
-        output_name = output_name if output_name else "output"
-        frames_list[0].save(
-            os.path.join(save_path, f"{output_name}.gif"),
-            save_all=True,
-            append_images=frames_list[1:],
-            optimize=False,
-            duration=80,
-            loop=0,
-        )
 
 
 class PositionalEncoding(nn.Module):
@@ -590,11 +536,13 @@ class Utils:
         return torch.utils.data.dataloader.default_collate(batch)
 
     @staticmethod
-    def save_images(images: torch.Tensor, save_path: str) -> None:
-        grid = torchvision.utils.make_grid(images)
-        img_arr = grid.permute(1, 2, 0).cpu().numpy()
-        img = Image.fromarray(img_arr)
-        img.save(save_path)
+    def save_images(videos: torch.Tensor, save_path: str) -> None:
+        for i in range(8):
+            images = videos[:, :, i, :, :]
+            grid = torchvision.utils.make_grid(images)
+            img_arr = grid.permute(1, 2, 0).cpu().numpy()
+            img = Image.fromarray(img_arr)
+            img.save(save_path)
 
     @staticmethod
     def save_checkpoint(
@@ -741,31 +689,11 @@ class Trainer:
             ema_model_name = f"{output_name}_ema.jpg"
 
         Utils.save_images(
-            images=sampled_images, save_path=os.path.join(self.save_path, model_name)
+            videos=sampled_images, save_path=os.path.join(self.save_path, model_name)
         )
         Utils.save_images(
-            images=ema_sampled_images,
+            videos=ema_sampled_images,
             save_path=os.path.join(self.save_path, ema_model_name),
-        )
-
-    def sample_gif(
-        self,
-        save_path: str = "",
-        sample_count: int = 1,
-        output_name: str = None,
-    ) -> None:
-        """Generates images with reverse process based on sampling method with both training model and ema model."""
-        self.diffusion.generate_gif(
-            eps_model=self.unet_model,
-            n=sample_count,
-            save_path=save_path,
-            output_name=output_name,
-        )
-        self.diffusion.generate_gif(
-            eps_model=self.ema_model,
-            n=sample_count,
-            save_path=save_path,
-            output_name=f"{output_name}_ema",
         )
 
     def train(self) -> None:
